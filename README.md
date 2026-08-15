@@ -111,17 +111,23 @@ The entire bar represents your model's context window (100% means it is fully sa
 | 50–75% | 🟡 Yellow | `██████░░░░ 60%` |
 | 75%+   | 🔴 Red    | `████████░░ 80%` |
 
-The `|` marker indicates your auto-compact threshold (`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`).
+The `|` marker indicates the point on the bar where Claude Code will auto-compact.
 
 ```
 ████░░|░░░░  60% used, below autocompact threshold
 ████████|█░  80% used, past autocompact → will auto-compact at end of turn
 ```
 
-`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` defaults to 95%, and can be customised in your `~/.claude/settings.json`:
+The marker's position is derived from two independent inputs, matching how Claude Code decides when to compact:
+
+1. **The auto-compact window** — a token budget (100K–1M). Set it with `/autocompact 500k`, which saves the [`autoCompactWindow`](https://code.claude.com/docs/en/settings) setting, or with the [`CLAUDE_CODE_AUTO_COMPACT_WINDOW`](https://code.claude.com/docs/en/env-vars) env var (plain integer). **The env var wins over the setting** (Claude's precedence is env var → `--autocompact` flag → setting). The status line reads the env var and the `autoCompactWindow` key in your `~/.claude/settings.json`.
+2. **`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`** — a percentage (1–100) of that window at which compaction actually fires. Lower values compact earlier.
+
+The bar itself is scaled to the model's full context window (200K or 1M), so the marker sits at `(window ÷ full context window) × pct`. If neither a window nor an override is set, no marker is shown — the model compacts at its default limit. Examples in `~/.claude/settings.json`:
 
 ```json
 {
+  "autoCompactWindow": "500k",
   "env": {
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70"
   }
@@ -146,7 +152,7 @@ In native terminals (Mac/Linux CLI), the status line auto-switches to a compact 
 | ----------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `O`/`S`/`H` + version, optional `+` | Current model (**O**pus/**S**onnet/**H**aiku) + version; `+` suffix for 1M context                |
 | lowercase letter                    | Advisor model                                                                                     |
-| `78%`, `(95)` when shown            | Context window usage; threshold in parentheses only when `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is set |
+| `78%`, `(50)` when shown            | Context window usage; auto-compact threshold in parentheses only when a custom window or percentage is set |
 | `h87%`, `BUST`                      | Cache hit rate during last turn, or cache bust                                                    |
 | `⎇ main`                            | Current git branch — no staged / modified / untracked counts                                      |
 | `$0.0`                              | Estimated cumulative session cost in USD                                                          |

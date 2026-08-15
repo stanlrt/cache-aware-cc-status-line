@@ -10,7 +10,24 @@ const fsp = fs.promises;
 const c = (code, s) => `\x1b[${code}m${s}\x1b[0m`;
 const sep = c(90, '|');
 
-const VERSION = '1.10.2';
+const VERSION = '1.11.0';
+
+// Parse an auto-compact WINDOW value into a token count. Handles the forms the
+// `/autocompact` command / `autoCompactWindow` setting accept: a number, a plain
+// integer string ("200000"), a k/M suffix ("500k", "1M"), or a bare 100-1000
+// meaning thousands ("200" -> 200000). Returns 0 if unparseable.
+function parseWindowTokens(v) {
+  if (typeof v === 'number') return v > 0 ? Math.round(v) : 0;
+  if (typeof v !== 'string') return 0;
+  const m = v.trim().match(/^(\d+(?:\.\d+)?)\s*([kKmM])?$/);
+  if (!m) return 0;
+  let n = parseFloat(m[1]);
+  const suf = m[2] ? m[2].toLowerCase() : '';
+  if (suf === 'k') n *= 1000;
+  else if (suf === 'm') n *= 1000000;
+  else if (n >= 100 && n <= 1000) n *= 1000; // bare 100-1000 = thousands
+  return n > 0 ? Math.round(n) : 0;
+}
 const FIVEH_CACHE_TTL_MS = 60 * 1000;
 const RAW_URL = 'https://raw.githubusercontent.com/stanlrt/simple-claude-code-status-line/main/statusline-command.js';
 const AUTO_UPDATE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -329,9 +346,14 @@ process.stdin.on('end', async () => {
     return 0;
   }
 
-  const advisorPromise = fsp.readFile(path.join(home, '.claude', 'settings.json'), 'utf8')
-    .then(s => { try { return JSON.parse(s).advisorModel || ''; } catch { return ''; } })
-    .catch(() => '');
+  const settingsPromise = fsp.readFile(path.join(claudeDir, 'settings.json'), 'utf8')
+    .then(s => {
+      try {
+        const j = JSON.parse(s);
+        return { advisorModel: j.advisorModel || '', autoCompactWindow: j.autoCompactWindow };
+      } catch { return { advisorModel: '', autoCompactWindow: undefined }; }
+    })
+    .catch(() => ({ advisorModel: '', autoCompactWindow: undefined }));
 
   const cavemanPromise = fsp.readFile(path.join(claudeDir, '.caveman-active'), 'utf8')
     .then(t => t.trim()).catch(() => '');
@@ -379,14 +401,15 @@ process.stdin.on('end', async () => {
     } catch { return ''; }
   })();
 
-  const [widthVal, advisorModel, cavemanMode, forcedMode, gitCache, fivehData] = await Promise.all([
+  const [widthVal, settings, cavemanMode, forcedMode, gitCache, fivehData] = await Promise.all([
     widthPromise,
-    advisorPromise,
+    settingsPromise,
     cavemanPromise,
     forcedModePromise,
     gitPromise,
     fivehPromise,
   ]);
+  const advisorModel = settings.advisorModel;
 
   let fivehFull = '';
   let fivehCompact = '';
@@ -400,7 +423,28 @@ process.stdin.on('end', async () => {
   let cols = widthVal || 999;
 
   const pct = json.context_window?.used_percentage;
-  const autocompactPct = parseFloat(process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) || 95;
+
+  // Where auto-compaction triggers, expressed as a % of the FULL context window
+  // (the same basis as used_percentage / the bar). Two independent inputs:
+  //   1. The auto-compact WINDOW (token count): env CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  //      wins over the `autoCompactWindow` setting (Claude precedence: env > flag > setting).
+  //   2. CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: % (1-100) of that window at which it fires.
+  const ctxSize = json.context_window?.context_window_size || 0;
+  const envWinRaw = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+  let acWindow = (envWinRaw != null && envWinRaw !== '')
+    ? (parseInt(envWinRaw, 10) || 0)             // env: plain integer only ("500k" -> 500), like Claude
+    : parseWindowTokens(settings.autoCompactWindow); // setting: full k/M/bare forms
+  const windowSet = acWindow > 0;
+  if (windowSet) {
+    acWindow = Math.max(acWindow, 100000);        // Claude clamps the window to a 100K minimum
+    if (ctxSize > 0) acWindow = Math.min(acWindow, ctxSize); // ...and caps at the model's window
+  }
+  const pctRaw = parseFloat(process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE);
+  const pctSet = pctRaw > 0 && pctRaw <= 100;
+  // Multiplier: explicit override wins; else compaction fires at the window itself
+  // (100%) when a window is configured; else the legacy 95% no-window default.
+  const acPct = pctSet ? pctRaw : (windowSet ? 100 : 95);
+  const autocompactPct = (windowSet && ctxSize > 0) ? (acWindow / ctxSize) * acPct : acPct;
   const BLOCKS = 10;
   let ctx_display;
   if (pct == null) {
@@ -505,7 +549,7 @@ process.stdin.on('end', async () => {
       const showThresh = autocompactPct < 95;
       const color = (showThresh && pct >= autocompactPct) ? 31
                   : pct < 50 ? 37 : pct < 75 ? 33 : 31;
-      ctxShort = c(color, `${Math.round(pct)}%`) + (showThresh ? c(90, ` (${autocompactPct})`) : '');
+      ctxShort = c(color, `${Math.round(pct)}%`) + (showThresh ? c(90, ` (${Math.round(autocompactPct)})`) : '');
     }
     parts.push(ctxShort);
 
